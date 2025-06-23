@@ -2,7 +2,7 @@ name: Build and deploy Azure Functions (Flex)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 jobs:
   build-and-deploy:
