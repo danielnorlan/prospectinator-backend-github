@@ -26,5 +26,3 @@ jobs:
         app-name: prospectinator-funcapp-github     # <-- nøyaktig som i Azure
         publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
         package: .
-        enable-oryx-build: true
-        scm-do-build-during-deployment: true
