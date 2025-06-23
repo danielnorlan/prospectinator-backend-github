@@ -21,9 +21,14 @@ if not PPLX_KEY:
 
 HEADERS = {"Authorization": f"Bearer {PPLX_KEY}", "Content-Type": "application/json"}
 
+# — regex til å finne de viktigste kolonnene —
 REGEX_FIRMA = re.compile(r"^(firma|bedrift|selskapsnavn|company|navn)", re.I)
 REGEX_ORGNR = re.compile(r"(org(\.|nr)?|organisasjons?nr)", re.I)
 REGEX_TLF   = re.compile(r"(telefon|phone|tlf|mobil|proff ?telefon)", re.I)
+
+# — lister for å finne selskap- og personkolonner til AI-kallet —
+COMPANY_COLS = ["Juridisk selskapsnavn", "Selskapsnavn", "Bedrift", "Company", "Firma"]
+PERSON_COLS  = ["Navn", "Person", "Kontaktperson", "Name"]
 
 PROSPECT_NR_COL  = "PROSPECTINATOR (TLF)"
 PROSPECT_SRC_COL = "PROSPECTINATOR (KILDE)"
@@ -95,8 +100,9 @@ async def process_xlsx_v1(blob: func.InputStream):
     tmp.write(blob.read()); tmp.flush()
     df = pd.read_excel(tmp.name, engine="openpyxl")
 
+    # ---- dynamisk deteksjon av Firmanavn / Org.nr / Telefon ----
     cols_lower = [c.lower().strip() for c in df.columns]
-    def find(rgx): 
+    def find(rgx):
         for i,c in enumerate(cols_lower):
             if rgx.search(c): return df.columns[i]
         return None
@@ -105,23 +111,48 @@ async def process_xlsx_v1(blob: func.InputStream):
     if missing:
         raise ValueError("Mangler kolonner: " + ", ".join(missing))
 
-    for c in (PROSPECT_NR_COL, PROSPECT_SRC_COL):
-        if c not in df.columns: df[c] = ""
+    # ---- dropp Unnamed / gamle kildekolonner ----
+    drop_cols = [c for c in df.columns if c.startswith("Unnamed") or 
+                 (c.lower().startswith("kilder") and c != PROSPECT_SRC_COL)]
+    if drop_cols:
+        df.drop(columns=drop_cols, inplace=True)
 
+    # ---- sørg for PROSPECT-kolonner ----
+    for c in (PROSPECT_NR_COL, PROSPECT_SRC_COL):
+        if c not in df.columns:
+            df[c] = ""
+
+    # ---- reordne kolonnene ----
     new_cols = [col_firma, col_orgnr, col_tlf, PROSPECT_NR_COL, PROSPECT_SRC_COL]
     new_cols += [c for c in df.columns if c not in new_cols]
     df = df.reindex(columns=new_cols)
 
+    # ---- finn kolonner til AI-oppslag ----
+    comp_col = next((c for c in COMPANY_COLS if c in df.columns), col_firma)
+    pers_col = next((c for c in PERSON_COLS  if c in df.columns), None)
+    if not pers_col:
+        raise ValueError("Fant ingen person-kolonne.")
+
+    # -------------------------------------------------------------------------
+    #  PROGRESS-BLOB & AI-KJØRING
+    # -------------------------------------------------------------------------
     svc = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
     progress_blob = Path(blob.name).stem + "_progress.json"
     prog_cli = svc.get_blob_client("progress", progress_blob)
-    work_rows = [(i,r) for i,r in df.iterrows()]
+
+    work_rows, empty = [], 0
+    for idx,row in df.iterrows():
+        if pd.isna(row.get(comp_col)) and pd.isna(row.get(pers_col)):
+            empty += 1
+            if empty >= 3: break
+        else:
+            empty = 0
+            work_rows.append((idx,row))
     total = len(work_rows)
     prog_cli.upload_blob(json.dumps({"processed":0,"total":total,"percentage":0,
-                                     "lastUpdate":datetime.utcnow().isoformat()+"Z"}),
-                         overwrite=True)
+                                     "lastUpdate":datetime.utcnow().isoformat()+"Z"}), overwrite=True)
 
-    tasks = [asyncio.create_task(_process_row(i,r,col_firma,col_tlf)) for i,r in work_rows]
+    tasks = [asyncio.create_task(_process_row(i,r,comp_col,pers_col)) for i,r in work_rows]
     done = 0
     for coro in asyncio.as_completed(tasks):
         idx,num,src = await coro
@@ -130,14 +161,16 @@ async def process_xlsx_v1(blob: func.InputStream):
         done += 1
         prog_cli.upload_blob(json.dumps({"processed":done,"total":total,
                                          "percentage":round(done/total*100,2),
-                                         "lastUpdate":datetime.utcnow().isoformat()+"Z"}),
-                             overwrite=True)
+                                         "lastUpdate":datetime.utcnow().isoformat()+"Z"}), overwrite=True)
 
+    # ---- skriv resultat-blob ----
     out_name = Path(blob.name).stem + "_processed.xlsx"
     res_cli  = svc.get_blob_client("results", out_name)
     try: res_cli.delete_blob()
     except ResourceNotFoundError: pass
-    buf = io.BytesIO();  df.to_excel(buf, index=False, engine="openpyxl"); buf.seek(0)
+
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl"); buf.seek(0)
     res_cli.upload_blob(buf, overwrite=True)
     logging.info("✔ Lagret results/%s", out_name)
 
@@ -154,8 +187,6 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
     svc = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
     blob_name = Path(file.filename).name
     svc.get_blob_client("uploads", blob_name).upload_blob(file.stream.read(), overwrite=True)
-
-    # fjern gammel processed
     try: svc.get_blob_client("results", Path(blob_name).stem+"_processed.xlsx").delete_blob()
     except ResourceNotFoundError: pass
 
@@ -167,8 +198,10 @@ def upload(req: func.HttpRequest) -> func.HttpResponse:
 def download(req: func.HttpRequest) -> func.HttpResponse:
     fn = req.params.get("filename")
     if not fn: return func.HttpResponse("Missing filename.", 400)
-    blob = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage")).get_blob_client("results", fn)
-    if not blob.exists(): return func.HttpResponse("File not ready yet.", 404)
+    blob = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))\
+           .get_blob_client("results", fn)
+    if not blob.exists():
+        return func.HttpResponse("File not ready yet.", 404)
     data = blob.download_blob().readall()
     headers = {"Content-Disposition":f"attachment; filename={fn}",
                "Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
@@ -180,7 +213,8 @@ def download(req: func.HttpRequest) -> func.HttpResponse:
 def progress(req: func.HttpRequest) -> func.HttpResponse:
     fn = req.params.get("filename")
     if not fn: return func.HttpResponse("Missing filename.", 400)
-    blob = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage")).get_blob_client(
-        "progress", Path(fn).stem+"_progress.json")
-    if not blob.exists(): return func.HttpResponse("Progress not started.", 404)
+    blob = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))\
+           .get_blob_client("progress", Path(fn).stem+"_progress.json")
+    if not blob.exists():
+        return func.HttpResponse("Progress not started.", 404)
     return func.HttpResponse(blob.download_blob().readall(), mimetype="application/json")
