@@ -1,3 +1,5 @@
+# Dette er en test for å se om GitHub Actions fungerer med Azure Functions.
+
 from __future__ import annotations
 import cgi
 import io
