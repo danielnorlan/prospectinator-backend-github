@@ -196,7 +196,7 @@ async def process_row(idx: int, row: pd.Series,
 # BLOB‐TRIGGER: PROCESS XLSX
 # -------------------------------------------------------------------
 @app.function_name(name="process_xlsx_v2")
-@app.blob_trigger(arg_name="blob", path="uploads/{name}", connection="AzureWebJobsStorage")
+@app.blob_trigger(arg_name="blob", path="uploads/{name}", connection="APP_STORAGE_CONNECTION")
 async def process_xlsx_v2(blob: func.InputStream):
     logging.info("▶ Starter prosessering: %s", blob.name)
 
@@ -232,7 +232,7 @@ async def process_xlsx_v2(blob: func.InputStream):
             rows.append((idx, row))
 
     # BlobService + sikre containere
-    svc = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
+    svc = BlobServiceClient.from_connection_string(os.getenv("APP_STORAGE_CONNECTION"))
     for container in ("uploads","progress","results"):
         cli = svc.get_container_client(container)
         try:   cli.create_container()
@@ -318,7 +318,7 @@ def UploadTest(req: func.HttpRequest) -> func.HttpResponse:
     try:
         tmp_path = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx").name
         with open(tmp_path, "wb") as t: t.write(file.read())
-        svc    = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
+        svc    = BlobServiceClient.from_connection_string(os.getenv("APP_STORAGE_CONNECTION"))
         up_cli = svc.get_blob_client("uploads", Path(file.filename).name)
         with open(tmp_path, "rb") as data:
             up_cli.upload_blob(data, overwrite=True)
@@ -339,7 +339,7 @@ def DownloadFile(req: func.HttpRequest) -> func.HttpResponse:
     if not filename:
         return func.HttpResponse("Missing filename parameter.", status_code=400)
     try:
-        svc  = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
+        svc  = BlobServiceClient.from_connection_string(os.getenv("APP_STORAGE_CONNECTION"))
         blob = svc.get_blob_client("results", filename)
         if not blob.exists():
             return func.HttpResponse("File not found.", status_code=404)
@@ -360,7 +360,7 @@ def GetProgress(req: func.HttpRequest) -> func.HttpResponse:
     if not filename:
         return func.HttpResponse("Missing filename parameter.", status_code=400)
     try:
-        svc       = BlobServiceClient.from_connection_string(os.getenv("AzureWebJobsStorage"))
+        svc       = BlobServiceClient.from_connection_string(os.getenv("APP_STORAGE_CONNECTION"))
         prog_name = Path(filename).stem + "_progress.json"
         blob_cli  = svc.get_blob_client("progress", prog_name)
         if not blob_cli.exists():
