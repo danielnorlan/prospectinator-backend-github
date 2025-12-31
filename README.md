@@ -1,4 +1,5 @@
 DEPRECATED. REPLACED BY ICP HUB
+https://github.com/noragentic/ICPHub
 # Prospectinator – AI-powered Excel / CSV Enrichment  8/22-25
 # Prospectinator – AI-powered Excel / CSV Enrichment  
 Serverless on Azure Functions • Python 3.11 • React Front-end
